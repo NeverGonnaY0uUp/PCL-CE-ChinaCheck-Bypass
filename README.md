@@ -8,6 +8,8 @@
 - **静态补丁工具**：`dist/tool/PCLRegionBypass.exe` —— 一次性把补丁写死进 exe
   （或对目录构建直接 patch `PCL.Core.dll`），适合长期使用。
 
+> 想尽快用起来？直接看 **[0. 快速开始](#quickstart)**。
+
 本目录包含：
 
 ```
@@ -15,6 +17,7 @@ bypass/
 ├─ PCLRegionBypass.csproj      # 静态补丁工具工程（net10.0-windows）
 ├─ Program.cs                  # 静态工具实现（bundle 解析 / IL 定位 / patch / 验证）
 ├─ README.md                   # 本文件
+├─ .gitignore                  # 排除 bin/obj 与运行时补丁备份
 ├─ dynamic/
 │  └─ PCLDynamicBypass/        # 双击运行版工程（启动前临时补丁 + 退出还原）
 │     ├─ PCLDynamicBypass.csproj
@@ -32,7 +35,87 @@ bypass/
 
 ---
 
-## 0. 双击运行版（推荐）
+## 目录
+
+| 章节 | 内容 |
+|:--|:--|
+| **[0. 快速开始](#quickstart)** | **先看这里：选哪种方式、三步上手、怎么确认成功** |
+| [1. 双击运行版（推荐）](#dynamic) | 复制 4 个文件 → 双击 → PCL 退出后自动还原 |
+| [2. 它到底改了什么](#how-it-works) | 只改 3 个字节；bundle 内 `PCL.Core.dll` 怎么定位 |
+| [3. 静态补丁工具用法](#tool-usage) | `inspect` / `patch` / `verify` / `diagnose` / `extract` |
+| [4. 本机实测记录](#verified) | 前后 SHA256、IL 对比、启动冒烟测试 |
+| [5. 局限与注意](#limitations) | 自更新会覆盖、压缩单文件不支持、版本差异 |
+| [6. 备选方案](#alternatives) | 不改二进制时，改系统区域 / 时区 / 语言 |
+
+---
+
+<a id="quickstart"></a>
+## 0. 快速开始（先看这里）
+
+### 0.1 选哪种方式？
+
+| 你的情况 | 用这个 | 特点 |
+|:--|:--|:--|
+| 只在自己机器上用，想"双击即用" | [双击运行版](#dynamic)（`dist/dynamic/`） | 启动前临时补丁，PCL 退出后自动还原 |
+| 想永久打好补丁，之后直接双击 PCL | [静态补丁工具](#tool-usage)（`dist/tool/`） | 一次 `patch`，exe 永久是补丁态 |
+| 想要现成的补丁版启动器 exe | `dist/launcher/Plain Craft Launcher 2.exe` | 备份后直接替换同版本 PCL 的 exe |
+| 目录构建（有独立 `PCL.Core.dll`） | 静态工具 `patch <目录>` | 直接改磁盘上的 DLL |
+| 只想先看看会改哪里 | `inspect` / `diagnose` | 只读分析，不动任何文件 |
+
+### 0.2 方式 A：双击运行版（最省事）
+
+**第 1 步 · 放文件。** 把 `dist/dynamic/` 里的 **4 个文件**复制到 PCL 启动器所在目录（和 PCL 的 exe 同级）：
+
+```
+D:\PCL\                                  ← PCL 启动器目录
+├─ Plain Craft Launcher 2.exe            ← 你的 PCL（不要改名、不要移动）
+├─ PCLDynamicBypass.exe                  ← 从 dist/dynamic/ 复制进来
+├─ PCLDynamicBypass.dll
+├─ PCLDynamicBypass.deps.json
+└─ PCLDynamicBypass.runtimeconfig.json
+```
+
+**第 2 步 · 双击。** 双击 `PCLDynamicBypass.exe`（以后每次都从这里启动，替代原来的 PCL exe）。
+
+**第 3 步 · 正常用。** 安装 / 下载 / 补全 / 整合包都不再被拦；**完全退出 PCL 后**，它的 exe 会自动还原成原样，目录里不留多余额外文件。
+
+> - 目录里必须**恰好 1 个**文件名含 `PCL` 的 exe（`PCL.exe`、`PCL-CE.exe` 都行）；0 个或 ≥2 个会弹窗终止，且**不改任何文件**。
+> - 官方产物名 `Plain Craft Launcher 2.exe` 不含 "PCL"，会走回退规则：唯一匹配时照样能用。
+> - 也可以显式指定目标：`PCLDynamicBypass.exe --target "D:\PCL\Plain Craft Launcher 2.exe"`。
+> - 日志：`%TEMP%\PCLDynamicBypass\launcher.log`（每次启动都记录哈希与还原结果）。
+> - 卸载：直接删掉这 4 个文件即可，PCL 本体没有被改动。
+> - 完整规则（异常恢复、重复双击等）见 [1. 双击运行版](#dynamic)。
+
+### 0.3 方式 B：静态补丁（一条命令）
+
+需要 **.NET 10 桌面运行时**。`dist/tool/` 放在任意位置，命令如下：
+
+```powershell
+# 单文件构建：直接对 exe 打补丁（会在旁边生成 .pclregionbak 备份）
+.\dist\tool\PCLRegionBypass.exe patch "C:\Path\To\Plain Craft Launcher 2.exe"
+
+# 目录构建：直接传安装目录，自动改里面的 PCL.Core.dll
+.\dist\tool\PCLRegionBypass.exe patch "C:\Path\To\PCL"
+```
+
+打完补丁后**直接双击原 PCL 即可**，不需要再经过本工具。想撤销：用同目录的 `*.pclregionbak` 覆盖回去（或重新解压官方包）。
+
+### 0.4 怎么确认成功了？
+
+```powershell
+# 1) 从单文件 exe 里导出内嵌的 PCL.Core.dll
+.\dist\tool\PCLRegionBypass.exe extract "C:\Path\To\Plain Craft Launcher 2.exe" PCL.Core.dll .\PCL.Core.dll
+# 2) 验证：补丁后所有分类都应输出 IsRestricted=False，并打印 [RESULT] 补丁生效
+.\dist\tool\PCLRegionBypass.exe verify  .\PCL.Core.dll
+```
+
+- 双击运行版：日志里能看到 `patchedHash=...` 和 `已还原原始 exe`；目标 exe 的 SHA256 在运行前后一致。
+- 最直观的验证：在 PCL 里点一次"安装 / 下载"，不再弹 `Region.Feature.Restricted`。
+
+---
+
+<a id="dynamic"></a>
+## 1. 双击运行版（推荐）
 
 ### 用法
 
@@ -114,7 +197,8 @@ bypass/
 
 ---
 
-## 1. 它到底改了什么
+<a id="how-it-works"></a>
+## 2. 它到底改了什么
 
 区域判定的调用链：
 
@@ -174,36 +258,95 @@ token，后续方法的 RVA 由元数据固定，所以缩短方法体只在原�
 
 ---
 
-## 2. 用法
+<a id="tool-usage"></a>
+## 3. 静态补丁工具用法
 
-工具已发布：`bypass/dist/tool/PCLRegionBypass.exe`（需要 .NET 10 桌面运行时）。
-想自己编译：`dotnet build bypass/PCLRegionBypass.csproj -c Release`。
+### 3.1 前置条件
+
+- Windows x64；
+- **.NET 10 桌面运行时**（`Microsoft.WindowsDesktop.App` 10.x；只有 `NETCore.App` 不够）；
+- 目标为官方 CI 构建的 `Plain Craft Launcher 2.exe`（.NET 单文件 bundle），或目录构建（磁盘上有独立的 `PCL.Core.dll`）；
+- patch 前**先关掉正在运行的 PCL**（exe 被占用会导致写入失败）。
+
+工具已发布：`dist/tool/PCLRegionBypass.exe`。想自己编译：`dotnet build PCLRegionBypass.csproj -c Release`（产物在 `bin/Release/net10.0-windows/`）。
+
+### 3.2 命令一览
+
+| 命令 | 作用 | 是否改文件 | 退出码 |
+|:--|:--|:--|:--|
+| `inspect <exe\|dll\|目录>` | 识别形态、列出 bundle 条目、打印目标方法当前 IL | 否 | 0 |
+| `patch <exe\|dll\|目录> [--no-backup]` | 写入 3 字节补丁，默认生成 `.pclregionbak` 备份 | 是（幂等） | 0 成功 / 1 失败 |
+| `verify <PCL.Core.dll>` | 反射加载，逐个分类打印 `IsRestricted` | 否 | 0 全部 False / 1 仍有 True |
+| `diagnose <PCL.Core.dll>` | 用目标 DLL 真实跑 `RegionPolicy`，打印本机信号与判定 | 否 | 0 |
+| `extract <exe> <条目名> <输出路径>` | 从单文件 bundle 导出内嵌文件（如 `PCL.Core.dll`） | 生成输出文件 | 0 |
+
+`-h` / `--help` / `help` 打印内置帮助；未知命令返回 2。
+
+### 3.3 三个典型场景
+
+**场景 1：单文件 exe（最常见）**
 
 ```powershell
-# 1) 只读分析：识别形态、列出 bundle 条目、打印目标方法当前 IL
-.\PCLRegionBypass.exe inspect "C:\Path\To\Plain Craft Launcher 2.exe"
+# 先只读分析：打印形态、bundle 条目、目标方法原始 IL
+.\PCLRegionBypass.exe inspect "C:\PCL\Plain Craft Launcher 2.exe"
 
-# 2) 打补丁（默认在目标旁生成 .pclregionbak 备份；--no-backup 可关闭）
-.\PCLRegionBypass.exe patch "C:\Path\To\Plain Craft Launcher 2.exe"
-#    也可以直接传安装目录：patch "C:\Path\To\PCL"
-
-# 3) 验证：反射加载 PCL.Core.dll，打印三种分类的 IsRestricted
-.\PCLRegionBypass.exe verify "C:\Path\To\PCL.Core.dll"
-
-# 4) 诊断：用目标 DLL 真实调用 RegionPolicy，打印本机信号与判定（不修改任何东西）
-.\PCLRegionBypass.exe diagnose "C:\Path\To\PCL.Core.dll"
-
-# 5) 导出单文件 bundle 里的条目（比对原版/补丁版用）
-.\PCLRegionBypass.exe extract "C:\Path\To\Plain Craft Launcher 2.exe" PCL.Core.dll .\PCL.Core.dll
+# 确认无误后再打补丁（旁边会生成 Plain Craft Launcher 2.exe.pclregionbak）
+.\PCLRegionBypass.exe patch "C:\PCL\Plain Craft Launcher 2.exe"
 ```
 
-命令是幂等的：已打过补丁的文件再跑 `patch` 会输出 `[SKIP]` 并退出码 0。
+**场景 2：目录构建（有独立 `PCL.Core.dll`）**
 
-**回滚**：把 `Plain Craft Launcher 2.exe.pclregionbak` 覆盖回原文件，或重新解压官方包。
+```powershell
+# 传目录：目录里有 PCL.Core.dll 就改它；没有则自动挑目录里最大的 exe
+.\PCLRegionBypass.exe patch "C:\src\PCL\bin\Release\net10.0-windows"
+```
+
+**场景 3：只验证 / 诊断，不改任何文件**
+
+```powershell
+# 先导出内嵌 DLL（原版或补丁版都行）
+.\PCLRegionBypass.exe extract "C:\PCL\Plain Craft Launcher 2.exe" PCL.Core.dll .\PCL.Core.dll
+
+# 原版：Mainland=True、Unknown=True；补丁后：全部 False
+.\PCLRegionBypass.exe verify .\PCL.Core.dll
+
+# 用该 DLL 真实调用 RegionPolicy，看本机为什么被判成 Mainland（geo-cn 等）
+.\PCLRegionBypass.exe diagnose .\PCL.Core.dll
+```
+
+### 3.4 参数、幂等与退出码
+
+- `--no-backup`：不生成 `.pclregionbak` 备份（默认生成；已存在则不覆盖）。
+- **幂等**：已打过补丁再跑 `patch` 会输出 `[SKIP] 目标方法已经是 "return false"` 并返回 0。
+- 失败返回 1，stderr 打印 `[FAIL] 异常类型: 原因`（如"找不到方法""bundle 条目越界""压缩存储"）。
+- 路径含空格必须加引号。
+- 写入方式：先写 `*.pclregiontmp-<pid>`，再原子替换目标文件，避免写一半把 exe 弄坏。
+
+### 3.5 回滚 / 卸载
+
+```powershell
+# 单文件 exe：用备份覆盖回去
+Copy-Item "C:\PCL\Plain Craft Launcher 2.exe.pclregionbak" "C:\PCL\Plain Craft Launcher 2.exe" -Force
+
+# 目录构建：还原备份的 PCL.Core.dll
+Copy-Item "C:\PCL\PCL.Core.dll.pclregionbak" "C:\PCL\PCL.Core.dll" -Force
+```
+
+或者直接重新解压官方发布包覆盖整个目录。工具本身不写注册表、不改系统设置，删掉工具即"卸载"。
+
+### 3.6 常见问题
+
+| 现象 | 原因 | 处理 |
+|:--|:--|:--|
+| 报错含"压缩存储" | 构建启用了 `EnableCompressionInSingleFile` | 用目录构建，或换未压缩的单文件构建 |
+| 报错含"找不到方法" | 上游改了区域判定实现 | 先用 `inspect` 确认类/方法名，必要时调整源码里的目标 |
+| 报错含"目录中既没有" | 传错了目录 | 传 PCL 安装目录，或直接传 exe |
+| 补丁成功但行为没变 | ReadyToRun / 自更新覆盖 / 启动的不是被补丁的产物 | 见 [5. 局限与注意](#limitations) |
 
 ---
 
-## 3. 本机实测记录（2026-10-20）
+<a id="verified"></a>
+## 4. 本机实测记录（2026-10-20）
 
 靶子：`~/Downloads/PCL2_CE_CI_x64/Plain Craft Launcher 2.exe`（23,785,032 B；bundle 6.0，
 93 条目，BundleID `tvcI6fvREuFG`，内嵌 `PCL.Core.dll` 3,287,040 B）
@@ -213,7 +356,7 @@ token，后续方法的 RVA 由元数据固定，所以缩短方法体只在原�
 补丁版  SHA256 511BB0A07679EB4F00DFDFD70AE1D95D64208BA53D2B273FA6060EC3F18C5933
 ```
 
-### 3.1 原版行为
+### 4.1 原版行为
 
 ```
 [目标方法] PCL.Core.App.Region.RegionAssessment::get_IsRestricted
@@ -226,7 +369,7 @@ verify（原版 DLL）:
   Classification=Mainland IsRestricted=True
 ```
 
-### 3.2 本机区域判定（原版 DLL，`diagnose`）
+### 4.2 本机区域判定（原版 DLL，`diagnose`）
 
 ```
 GeoName = CN            TimeZoneId = China Standard Time
@@ -239,7 +382,7 @@ IsRestricted   = True
 
 即：在这台中国大陆机器上，不 patch 的话安装功能确实会被拦。
 
-### 3.3 补丁后
+### 4.3 补丁后
 
 ```
   方法头 CodeSize: 26 -> 2
@@ -256,7 +399,7 @@ verify（补丁后 DLL）:
 同时测试了**目录构建**路径（源码当天构建的 `PCL.Core.dll`，3,145,216 B，IL 22 字节）：
 patch 后同样全部 False，说明工具不依赖具体版本的方法体长度/指令序列。
 
-### 3.4 启动冒烟测试
+### 4.4 启动冒烟测试
 
 补丁版 exe 启动后正常进入生命周期服务（`PCL\Log\LastPending.log` 可见 Startup 日志），
 随后因**测试沙箱**禁止写 `%LOCALAPPDATA%\PCLCE\instance.lock` 而在单例服务处退出（exit 1）；
@@ -264,7 +407,8 @@ patch 后同样全部 False，说明工具不依赖具体版本的方法体长�
 
 ---
 
-## 4. 局限与注意
+<a id="limitations"></a>
+## 5. 局限与注意
 
 1. **只关掉"区域拦截"**：`Lang.IsFeaturesUnrestricted` / `Lang.IsChineseMainland` 控制的
    "非中国大陆隐藏特供功能"（MC 百科入口、翻译、中文搜索等）属于另一套逻辑（取决于启动器
@@ -278,7 +422,8 @@ patch 后同样全部 False，说明工具不依赖具体版本的方法体长�
    `Evaluate` 内直接返回，或方法被内联重命名，需要相应调整目标。
 5. **只改本地产物**：不涉及服务器、不代理网络；判定本来就全在客户端。
 
-## 5. 备选方案（不想改二进制时）
+<a id="alternatives"></a>
+## 6. 备选方案（不想改二进制时）
 
 区域判定全部来自本机设置，改设置也能绕过（但会影响整台机器，且需要管理员）：
 
