@@ -1,0 +1,14 @@
+# Build output
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Patch/backup artifacts produced by the tools at runtime
+*.pclregionbak
+*.pclbypass.bak
+*.pclbypass.marker
+
+# Launcher logs / temp
+launcher.log
